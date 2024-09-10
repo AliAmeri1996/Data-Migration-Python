@@ -1,0 +1,120 @@
+import requests
+import json
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+
+
+# 1. Fetch Data from the Met Museum API
+def fetch_met_data(object_id):
+    met_api_url = f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{object_id}"
+    response = requests.get(met_api_url)
+    if response.status_code == 200:
+        return response.json()
+    return None
+
+
+# 2. Fetch a list of all paintings from the Met Museum
+def fetch_all_painting_ids():
+    search_url = "https://collectionapi.metmuseum.org/public/collection/v1/search"
+    params = {
+        "q": "painting",
+        "hasImages": "true",
+        "objectName": "Painting"
+    }
+    response = requests.get(search_url, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        return data.get("objectIDs", [])
+    return []
+
+
+# 3. Transform the Data
+def transform_data(met_data):
+    if not met_data or met_data.get("objectName") != "Painting":
+        return None
+
+    transformed_data = {
+        "title": met_data.get("title"),
+        "artist": met_data.get("artistDisplayName"),
+        "date": met_data.get("objectDate"),
+        "medium": met_data.get("medium"),
+        "dimensions": met_data.get("dimensions"),
+        "id": met_data.get("objectID")
+    }
+
+    date = met_data.get("objectDate", "Unspecified")
+    medium = met_data.get("medium", "Unspecified")
+    dimensions = met_data.get("dimensions", "Unspecified")
+    description_text = f"Date: {date}\nMedium: {medium}\nDimensions: {dimensions}"
+
+    return {
+        'objects-form[title_ru]': transformed_data.get("title", "Unnamed"),
+        'objects-form[title_en]': transformed_data.get("title", "Unnamed"),
+        'objects-form[description_ru]': description_text,
+        'objects-form[description_en]': description_text,
+        'objects-form[search_id]': transformed_data.get("id", "Unspecified")
+    }
+
+
+# 4. Download image
+def download_image(image_url):
+    response = requests.get(image_url)
+    if response.status_code == 200:
+        return BytesIO(response.content)
+    return None
+
+
+# 5. Send Data to ARV World API
+def send_data_to_arv(transformed_data, image_file):
+    arv_api_url = "" #The ARV web
+    headers = {
+        '' # Access token of the website here
+    }
+
+    files = [('...', ('image.jpg', image_file, 'image/jpeg'))]
+    response = requests.post(arv_api_url, headers=headers, files=files, data=transformed_data)
+    return response.status_code
+
+
+# 6. Process a single painting
+def process_painting(object_id):
+    met_data = fetch_met_data(object_id)
+    if met_data:
+        transformed_data = transform_data(met_data)
+        if transformed_data:
+            image_url = met_data.get("primaryImage")
+            if image_url:
+                image_file = download_image(image_url)
+                if image_file:
+                    return send_data_to_arv(transformed_data, image_file)
+    return None
+
+
+# 7. Main execution with concurrency
+def main():
+    painting_ids = fetch_all_painting_ids()
+    if not painting_ids:
+        print("No painting IDs found.")
+        return
+
+    max_workers = 80  # Limit to 80 tasks per second
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_id = {executor.submit(process_painting, obj_id): obj_id for obj_id in painting_ids}
+
+        for future in as_completed(future_to_id):
+            status_code = future.result()
+            if status_code:
+                # Print only when there's an error
+                if status_code not in [200, 201]:
+                    print(f"Failed to send data for object ID {future_to_id[future]}. Status code: {status_code}")
+            else:
+                print(f"Failed to process object ID {future_to_id[future]}.")
+
+    print("Transfer complete.")
+
+
+if __name__ == "__main__":
+    start_time = time.time()
+    main()
+    print(f"Completed in {time.time() - start_time:.2f} seconds.")
